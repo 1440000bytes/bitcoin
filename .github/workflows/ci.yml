@@ -19,7 +19,7 @@ concurrency:
 
 env:
   CI_FAILFAST_TEST_LEAVE_DANGLING: 1  # GHA does not care about dangling processes and setting this variable avoids killing the CI script itself on error
-  MAKEJOBS: '-j10'
+  MAKEJOBS: '-j4'
 
 jobs:
   test-each-commit:
@@ -269,7 +269,7 @@ jobs:
     name: 'ASan + LSan + UBSan + integer, no depends, USDT'
     runs-on: ubuntu-24.04 # has to match container in ci/test/00_setup_env_native_asan.sh for tracing tools
     if: ${{ vars.SKIP_BRANCH_PUSH != 'true' || github.event_name == 'pull_request' }}
-    timeout-minutes: 120
+    timeout-minutes: 360
     env:
       FILE_ENV: "./ci/test/00_setup_env_native_asan.sh"
       DANGER_CI_ON_HOST_FOLDERS: 1
