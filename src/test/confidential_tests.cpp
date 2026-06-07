@@ -9,13 +9,16 @@
 //   * the homomorphic "balance tally": sum(inputs) == sum(outputs) + fee*H
 // These are exactly the primitives Phase 3's CheckTxInputs replacement calls.
 
+#include <blind.h>
 #include <compressor.h>
 #include <consensus/confidential.h>
 #include <hash.h>
+#include <key.h>
 #include <primitives/confidential.h>
 #include <primitives/transaction.h>
 #include <random.h>
 #include <streams.h>
+#include <test/util/setup_common.h>
 
 #include <cstring>
 
@@ -40,7 +43,7 @@ void RandBlind(unsigned char out[32])
 }
 } // namespace
 
-BOOST_AUTO_TEST_SUITE(confidential_tests)
+BOOST_FIXTURE_TEST_SUITE(confidential_tests, BasicTestingSetup)
 
 // A single commitment + range proof round-trips: commit, prove, verify, and the
 // proof recovers the original [min,max] range.
@@ -390,6 +393,60 @@ BOOST_AUTO_TEST_CASE(sighash_binds_confidential_fields)
 
     // Identical outputs -> identical hash (sanity).
     BOOST_CHECK(outputs_hash({base}) == outputs_hash({base}));
+}
+
+// Phase 6: the full wallet round trip. Spend a 100-sat explicit input into two
+// blinded outputs (70 to Alice, 29 to Bob) plus an explicit 1-sat fee. The
+// blinded transaction must satisfy consensus (ct::CheckConfidential), and each
+// receiver must recover exactly their amount with their own key -- and nothing
+// with the wrong key.
+BOOST_AUTO_TEST_CASE(wallet_blind_unblind_roundtrip)
+{
+    CKey alice = GenerateRandomKey();
+    CKey bob = GenerateRandomKey();
+    const CPubKey alice_pub = alice.GetPubKey();
+    const CPubKey bob_pub = bob.GetPubKey();
+
+    // One explicit input worth 100 (blind = zero).
+    const std::vector<CAmount> in_amounts{100};
+    const std::vector<uint256> in_blinds{uint256::ZERO};
+
+    CMutableTransaction tx;
+    tx.vin.emplace_back(); // a placeholder input; values come from in_amounts
+    CTxOut o_alice; o_alice.nValue = CAmount{70}; o_alice.scriptPubKey << OP_TRUE;
+    CTxOut o_bob;   o_bob.nValue = CAmount{29};   o_bob.scriptPubKey << OP_DUP;
+    CTxOut o_fee;   o_fee.nValue = CAmount{1};    // explicit fee, empty script
+    tx.vout = {o_alice, o_bob, o_fee};
+
+    const std::vector<size_t> to_blind{0, 1};
+    const std::vector<CPubKey> recv{alice_pub, bob_pub};
+    BOOST_REQUIRE(blinding::BlindTransaction(in_amounts, in_blinds, tx, to_blind, recv));
+
+    // The two payment outputs are now committed and carry proofs + nonces.
+    BOOST_CHECK(tx.vout[0].nValue.IsCommitment());
+    BOOST_CHECK(tx.vout[1].nValue.IsCommitment());
+    BOOST_CHECK(tx.vout[0].HasRangeproof());
+    BOOST_CHECK(!tx.vout[0].nNonce.IsNull());
+    BOOST_CHECK(tx.vout[2].nValue.IsExplicit()); // fee stays explicit
+
+    // Consensus accepts the blinded transaction (input is the explicit 100).
+    std::vector<CTxOut> spent_inputs;
+    CTxOut spent; spent.nValue = CAmount{100}; spent.scriptPubKey << OP_TRUE;
+    spent_inputs.push_back(spent);
+    BOOST_CHECK(ct::CheckConfidential(spent_inputs, tx.vout));
+
+    // Alice recovers 70, Bob recovers 29, each only with their own key.
+    auto a = blinding::UnblindOutput(tx.vout[0], alice);
+    BOOST_REQUIRE(a.has_value());
+    BOOST_CHECK_EQUAL(a->first, CAmount{70});
+
+    auto b = blinding::UnblindOutput(tx.vout[1], bob);
+    BOOST_REQUIRE(b.has_value());
+    BOOST_CHECK_EQUAL(b->first, CAmount{29});
+
+    // Wrong key cannot unblind.
+    BOOST_CHECK(!blinding::UnblindOutput(tx.vout[0], bob).has_value());
+    BOOST_CHECK(!blinding::UnblindOutput(tx.vout[1], alice).has_value());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
