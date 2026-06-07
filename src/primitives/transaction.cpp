@@ -79,6 +79,8 @@ bool CTransaction::ComputeHasWitness() const
 {
     return std::any_of(vin.begin(), vin.end(), [](const auto& input) {
         return !input.scriptWitness.IsNull();
+    }) || std::any_of(vout.begin(), vout.end(), [](const auto& output) {
+        return output.HasRangeproof();
     });
 }
 

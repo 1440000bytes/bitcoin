@@ -9,7 +9,9 @@
 //   * the homomorphic "balance tally": sum(inputs) == sum(outputs) + fee*H
 // These are exactly the primitives Phase 3's CheckTxInputs replacement calls.
 
+#include <consensus/confidential.h>
 #include <primitives/confidential.h>
+#include <primitives/transaction.h>
 #include <random.h>
 #include <streams.h>
 
@@ -214,6 +216,93 @@ BOOST_AUTO_TEST_CASE(confidential_nonce_serialization)
     CConfidentialNonce n2;
     ss >> n2;
     BOOST_CHECK(n == n2);
+}
+
+namespace {
+// Build a committed CTxOut for `value` using `blind`, attach a valid range proof,
+// and (optionally) give it a non-empty scriptPubKey.
+CTxOut MakeBlindedOutput(ZKPContext& z, uint64_t value, const unsigned char blind[32],
+                         bool spendable = true)
+{
+    secp256k1_pedersen_commitment commit;
+    BOOST_REQUIRE(secp256k1_pedersen_commit(z.ctx, &commit, blind, value, secp256k1_generator_h));
+    unsigned char ser[33];
+    BOOST_REQUIRE(secp256k1_pedersen_commitment_serialize(z.ctx, ser, &commit));
+
+    CTxOut out;
+    out.nValue.SetToCommitment(ser);
+    if (spendable) out.scriptPubKey << OP_TRUE;
+
+    unsigned char proof[5134];
+    size_t plen = sizeof(proof);
+    BOOST_REQUIRE(secp256k1_rangeproof_sign(z.ctx, proof, &plen, 0, &commit, blind, blind,
+                                            0, 0, value, nullptr, 0, nullptr, 0,
+                                            secp256k1_generator_h));
+    out.rangeproof.assign(proof, proof + plen);
+    return out;
+}
+} // namespace
+
+// Phase 3: a hand-built confidential transaction with committed inputs and
+// outputs balances under ct::CheckConfidential, and tampering breaks it.
+BOOST_AUTO_TEST_CASE(check_confidential_transaction)
+{
+    ZKPContext z;
+
+    // One blinded input worth 100. Outputs: blinded 70 + blinded 29 + explicit
+    // fee 1 (empty script). 100 == 70 + 29 + 1. The output blinds must sum to the
+    // input blind (the fee is explicit -> zero blind); solve the last one.
+    const uint64_t in_val = 100, out0 = 70, out1 = 29, fee = 1;
+
+    unsigned char zero[32] = {0};
+    unsigned char b_in[32], b_out0[32], b_out1[32];
+    RandBlind(b_in);
+    RandBlind(b_out0);
+    std::memset(b_out1, 0, 32);
+
+    // Solve the LAST blind so the commitments tally. The solved blind must land
+    // on a committed output (b_out1), NOT the explicit fee (which is zero-blind),
+    // so order the elements [in | out0, fee, out1] with out1 last.
+    const uint64_t values[4] = {in_val, out0, fee, out1};
+    unsigned char b_fee[32] = {0};
+    const unsigned char* gen_blinds[4] = {zero, zero, zero, zero};
+    unsigned char* blind_ptrs[4] = {b_in, b_out0, b_fee, b_out1};
+    BOOST_REQUIRE(secp256k1_pedersen_blind_generator_blind_sum(
+        z.ctx, values, gen_blinds, blind_ptrs, /*n_total=*/4, /*n_inputs=*/1));
+
+    std::vector<CTxOut> inputs{MakeBlindedOutput(z, in_val, b_in)};
+    std::vector<CTxOut> outputs{
+        MakeBlindedOutput(z, out0, b_out0),
+        MakeBlindedOutput(z, out1, b_out1),
+    };
+    CTxOut fee_out; // explicit, empty script
+    fee_out.nValue = CAmount{static_cast<int64_t>(fee)};
+    outputs.push_back(fee_out);
+
+    BOOST_CHECK(ct::CheckConfidential(inputs, outputs));
+
+    // Tamper 1: corrupt a range proof -> output proof check fails.
+    {
+        auto bad = outputs;
+        bad[0].rangeproof[bad[0].rangeproof.size() / 2] ^= 0x01;
+        BOOST_CHECK(!ct::CheckConfidential(inputs, bad));
+    }
+
+    // Tamper 2: drop the fee output -> balance no longer tallies (100 != 99).
+    {
+        std::vector<CTxOut> bad{outputs[0], outputs[1]};
+        BOOST_CHECK(!ct::CheckConfidential(inputs, bad));
+    }
+
+    // Sanity: an output committing to an inflated amount (re-blinded for 71)
+    // breaks the tally even though its own range proof is valid.
+    {
+        unsigned char b_cheat[32];
+        RandBlind(b_cheat);
+        auto bad = outputs;
+        bad[0] = MakeBlindedOutput(z, out0 + 1, b_cheat);
+        BOOST_CHECK(!ct::CheckConfidential(inputs, bad));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

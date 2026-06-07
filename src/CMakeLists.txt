@@ -113,6 +113,7 @@ endif()
 
 add_library(bitcoin_consensus STATIC EXCLUDE_FROM_ALL
   arith_uint256.cpp
+  consensus/confidential.cpp
   consensus/merkle.cpp
   consensus/tx_check.cpp
   hash.cpp

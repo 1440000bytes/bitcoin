@@ -7,6 +7,7 @@
 #include <chain.h>
 #include <coins.h>
 #include <consensus/amount.h>
+#include <consensus/confidential.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
 #include <primitives/transaction.h>
@@ -185,6 +186,14 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
         return false;
     }
 
+    // A Confidential Transaction has any committed input or output. Such txs
+    // hide their amounts, so the explicit value arithmetic below is replaced by
+    // a homomorphic commitment tally plus range proofs (see ct::CheckConfidential).
+    bool is_confidential = false;
+    for (const auto& txout : tx.vout) {
+        if (txout.nValue.IsCommitment()) { is_confidential = true; break; }
+    }
+
     CAmount nValueIn = 0;
     for (unsigned int i = 0; i < tx.vin.size(); ++i) {
         const COutPoint &prevout = tx.vin[i].prevout;
@@ -197,11 +206,42 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
                 strprintf("tried to spend coinbase at depth %d", nSpendHeight - coin.nHeight));
         }
 
-        // Check for negative or overflow input values
-        nValueIn += coin.out.nValue;
-        if (!MoneyRange(coin.out.nValue) || !MoneyRange(nValueIn)) {
-            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-inputvalues-outofrange");
+        if (coin.out.nValue.IsCommitment()) {
+            is_confidential = true;
+        } else {
+            // Check for negative or overflow input values (explicit inputs only).
+            nValueIn += coin.out.nValue;
+            if (!MoneyRange(coin.out.nValue) || !MoneyRange(nValueIn)) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-inputvalues-outofrange");
+            }
         }
+    }
+
+    if (is_confidential) {
+        // Hidden amounts: verify the commitment balance and every output's range
+        // proof. The fee is an explicit, provably-unspendable (empty-script)
+        // output, which the tally already accounts for (sum(in) == sum(out)).
+        std::vector<CTxOut> spent;
+        spent.reserve(tx.vin.size());
+        for (const auto& in : tx.vin) {
+            spent.push_back(inputs.AccessCoin(in.prevout).out);
+        }
+        if (!ct::CheckConfidential(spent, tx.vout)) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-confidential-balance",
+                "confidential value balance or range proof check failed");
+        }
+
+        CAmount fee = 0;
+        for (const auto& txout : tx.vout) {
+            if (txout.scriptPubKey.empty() && txout.nValue.IsExplicit()) {
+                fee += txout.nValue.GetAmount();
+            }
+        }
+        if (!MoneyRange(fee)) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-fee-outofrange");
+        }
+        txfee = fee;
+        return true;
     }
 
     const CAmount value_out = tx.GetValueOut();
