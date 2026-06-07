@@ -8,6 +8,7 @@
 
 #include <attributes.h>
 #include <consensus/amount.h>
+#include <primitives/confidential.h>
 #include <script/script.h>
 #include <serialize.h>
 #include <uint256.h>
@@ -149,7 +150,8 @@ public:
 class CTxOut
 {
 public:
-    CAmount nValue;
+    CConfidentialValue nValue;  //!< explicit amount or Pedersen commitment
+    CConfidentialNonce nNonce;  //!< ephemeral pubkey for ECDH to the receiver (null unless blinded)
     CScript scriptPubKey;
 
     CTxOut()
@@ -159,22 +161,27 @@ public:
 
     CTxOut(const CAmount& nValueIn, CScript scriptPubKeyIn);
 
-    SERIALIZE_METHODS(CTxOut, obj) { READWRITE(obj.nValue, obj.scriptPubKey); }
+    SERIALIZE_METHODS(CTxOut, obj) { READWRITE(obj.nValue, obj.nNonce, obj.scriptPubKey); }
 
     void SetNull()
     {
-        nValue = -1;
+        nValue.SetNull();
+        nNonce.SetNull();
         scriptPubKey.clear();
     }
 
     bool IsNull() const
     {
-        return (nValue == -1);
+        return nValue.IsNull();
     }
+
+    //! True when this output's amount is hidden behind a Pedersen commitment.
+    bool IsBlinded() const { return nValue.IsCommitment(); }
 
     friend bool operator==(const CTxOut& a, const CTxOut& b)
     {
         return (a.nValue       == b.nValue &&
+                a.nNonce       == b.nNonce &&
                 a.scriptPubKey == b.scriptPubKey);
     }
 

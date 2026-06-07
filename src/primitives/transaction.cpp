@@ -60,7 +60,11 @@ CTxOut::CTxOut(const CAmount& nValueIn, CScript scriptPubKeyIn)
 
 std::string CTxOut::ToString() const
 {
-    return strprintf("CTxOut(nValue=%d.%08d, scriptPubKey=%s)", nValue / COIN, nValue % COIN, HexStr(scriptPubKey).substr(0, 30));
+    if (IsBlinded()) {
+        return strprintf("CTxOut(nValue=CONFIDENTIAL, scriptPubKey=%s)", HexStr(scriptPubKey).substr(0, 30));
+    }
+    const CAmount amount{nValue};
+    return strprintf("CTxOut(nValue=%d.%08d, scriptPubKey=%s)", amount / COIN, amount % COIN, HexStr(scriptPubKey).substr(0, 30));
 }
 
 CMutableTransaction::CMutableTransaction() : version{CTransaction::CURRENT_VERSION}, nLockTime{0} {}

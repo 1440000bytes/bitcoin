@@ -45,6 +45,21 @@ public:
     CConfidentialValue() { SetNull(); }
     explicit CConfidentialValue(CAmount amount) { SetToAmount(amount); }
 
+    // Phase 2b compatibility layer. While blinding does not yet exist (Phase 6),
+    // every value is either null or explicit, so legacy code that treats an
+    // output value as a CAmount keeps working unchanged. A null value maps to the
+    // historical -1 sentinel; a commitment has no representable amount and maps to
+    // -1 as well (consensus code that must handle commitments branches on
+    // IsCommitment() explicitly rather than relying on this conversion).
+    CConfidentialValue& operator=(CAmount amount) { SetToAmount(amount); return *this; }
+    CConfidentialValue& operator+=(CAmount amount) { SetToAmount(GetAmount() + amount); return *this; }
+    CConfidentialValue& operator-=(CAmount amount) { SetToAmount(GetAmount() - amount); return *this; }
+    operator CAmount() const
+    {
+        if (IsExplicit()) return GetAmount();
+        return -1;
+    }
+
     void SetNull() { vch.clear(); }
     bool IsNull() const { return vch.empty(); }
 

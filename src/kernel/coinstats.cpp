@@ -105,7 +105,9 @@ static void ApplyStats(CCoinsStats& stats, const uint256& hash, const std::map<u
     for (auto it = outputs.begin(); it != outputs.end(); ++it) {
         stats.nTransactionOutputs++;
         if (stats.total_amount.has_value()) {
-            stats.total_amount = CheckedAdd(*stats.total_amount, it->second.out.nValue);
+            // Confidential outputs hide their amount; only explicit values can be
+            // summed into the chainstate total (it becomes unknowable otherwise).
+            stats.total_amount = CheckedAdd(*stats.total_amount, CAmount{it->second.out.nValue});
         }
         stats.nBogoSize += GetBogoSize(it->second.out.scriptPubKey);
     }
