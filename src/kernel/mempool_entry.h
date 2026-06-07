@@ -152,8 +152,15 @@ public:
           nSizeWithAncestors{GetTxSize()},
           nModFeesWithAncestors{nFee},
           nSigOpCostWithAncestors{sigOpCost} {
+            // Confidential transactions hide output amounts, so GetValueOut()
+            // (explicit outputs only) does not reconstruct the input value and
+            // this coin-age sanity check does not apply.
+            bool any_confidential = false;
+            for (const auto& txout : tx->vout) {
+                if (txout.nValue.IsCommitment()) { any_confidential = true; break; }
+            }
             CAmount nValueIn = tx->GetValueOut() + nFee;
-            assert(inChainInputValue <= nValueIn);
+            assert(any_confidential || inChainInputValue <= nValueIn);
         }
 
     CTxMemPoolEntry(ExplicitCopyTag, const CTxMemPoolEntry& entry) : CTxMemPoolEntry(entry) {}

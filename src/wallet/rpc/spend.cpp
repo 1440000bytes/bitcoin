@@ -1669,7 +1669,7 @@ RPCHelpMan sendall()
                 if (addresses_without_amount.count(addr) > 0) {
                     out.nValue = per_output_without_amount;
                     if (!gave_remaining_to_first) {
-                        out.nValue += remainder % addresses_without_amount.size();
+                        out.nValue = CAmount{out.nValue} + static_cast<CAmount>(remainder % addresses_without_amount.size());
                         gave_remaining_to_first = true;
                     }
                     if (IsDust(out, pwallet->chain().relayDustFee())) {

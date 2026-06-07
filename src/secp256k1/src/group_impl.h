@@ -195,6 +195,44 @@ static void secp256k1_ge_set_gej_var(secp256k1_ge *r, secp256k1_gej *a) {
     SECP256K1_GE_VERIFY(r);
 }
 
+static void secp256k1_ge_set_all_gej(secp256k1_ge *r, const secp256k1_gej *a, size_t len) {
+    secp256k1_fe u;
+    size_t i;
+#ifdef VERIFY
+    for (i = 0; i < len; i++) {
+        SECP256K1_GEJ_VERIFY(&a[i]);
+        VERIFY_CHECK(!secp256k1_gej_is_infinity(&a[i]));
+    }
+#endif
+
+    if (len == 0) {
+        return;
+    }
+
+    /* Use destination's x coordinates as scratch space */
+    r[0].x = a[0].z;
+    for (i = 1; i < len; i++) {
+        secp256k1_fe_mul(&r[i].x, &r[i - 1].x, &a[i].z);
+    }
+    secp256k1_fe_inv(&u, &r[len - 1].x);
+
+    for (i = len - 1; i > 0; i--) {
+        secp256k1_fe_mul(&r[i].x, &r[i - 1].x, &u);
+        secp256k1_fe_mul(&u, &u, &a[i].z);
+    }
+    r[0].x = u;
+
+    for (i = 0; i < len; i++) {
+        secp256k1_ge_set_gej_zinv(&r[i], &a[i], &r[i].x);
+    }
+
+#ifdef VERIFY
+    for (i = 0; i < len; i++) {
+        SECP256K1_GE_VERIFY(&r[i]);
+    }
+#endif
+}
+
 static void secp256k1_ge_set_all_gej_var(secp256k1_ge *r, const secp256k1_gej *a, size_t len) {
     secp256k1_fe u;
     size_t i;
@@ -299,14 +337,14 @@ static void secp256k1_ge_set_infinity(secp256k1_ge *r) {
 }
 
 static void secp256k1_gej_clear(secp256k1_gej *r) {
-    secp256k1_memclear(r, sizeof(secp256k1_gej));
+    secp256k1_memclear_explicit(r, sizeof(secp256k1_gej));
 }
 
 static void secp256k1_ge_clear(secp256k1_ge *r) {
-    secp256k1_memclear(r, sizeof(secp256k1_ge));
+    secp256k1_memclear_explicit(r, sizeof(secp256k1_ge));
 }
 
-static int secp256k1_ge_set_xo_var(secp256k1_ge *r, const secp256k1_fe *x, int odd) {
+static int secp256k1_ge_set_xquad(secp256k1_ge *r, const secp256k1_fe *x) {
     secp256k1_fe x2, x3;
     int ret;
     SECP256K1_FE_VERIFY(x);
@@ -317,6 +355,14 @@ static int secp256k1_ge_set_xo_var(secp256k1_ge *r, const secp256k1_fe *x, int o
     r->infinity = 0;
     secp256k1_fe_add_int(&x3, SECP256K1_B);
     ret = secp256k1_fe_sqrt(&r->y, &x3);
+
+    SECP256K1_GE_VERIFY(r);
+    return ret;
+}
+
+static int secp256k1_ge_set_xo_var(secp256k1_ge *r, const secp256k1_fe *x, int odd) {
+    int ret;
+    ret = secp256k1_ge_set_xquad(r, x);
     secp256k1_fe_normalize_var(&r->y);
     if (secp256k1_fe_is_odd(&r->y) != odd) {
         secp256k1_fe_negate(&r->y, &r->y, 1);
@@ -860,6 +906,7 @@ static void secp256k1_ge_from_storage(secp256k1_ge *r, const secp256k1_ge_storag
 static SECP256K1_INLINE void secp256k1_gej_cmov(secp256k1_gej *r, const secp256k1_gej *a, int flag) {
     SECP256K1_GEJ_VERIFY(r);
     SECP256K1_GEJ_VERIFY(a);
+    VERIFY_CHECK(flag == 0 || flag == 1);
 
     secp256k1_fe_cmov(&r->x, &a->x, flag);
     secp256k1_fe_cmov(&r->y, &a->y, flag);
@@ -870,6 +917,7 @@ static SECP256K1_INLINE void secp256k1_gej_cmov(secp256k1_gej *r, const secp256k
 }
 
 static SECP256K1_INLINE void secp256k1_ge_storage_cmov(secp256k1_ge_storage *r, const secp256k1_ge_storage *a, int flag) {
+    VERIFY_CHECK(flag == 0 || flag == 1);
     secp256k1_fe_storage_cmov(&r->x, &a->x, flag);
     secp256k1_fe_storage_cmov(&r->y, &a->y, flag);
 }
@@ -881,6 +929,20 @@ static void secp256k1_ge_mul_lambda(secp256k1_ge *r, const secp256k1_ge *a) {
     secp256k1_fe_mul(&r->x, &r->x, &secp256k1_const_beta);
 
     SECP256K1_GE_VERIFY(r);
+}
+
+static int secp256k1_gej_has_quad_y_var(const secp256k1_gej *a) {
+    secp256k1_fe yz;
+
+    if (a->infinity) {
+        return 0;
+    }
+
+    /* We rely on the fact that the Jacobi symbol of 1 / a->z^3 is the same as
+     * that of a->z. Thus a->y / a->z^3 is a quadratic residue iff a->y * a->z
+       is */
+    secp256k1_fe_mul(&yz, &a->y, &a->z);
+    return secp256k1_fe_is_square_var(&yz);
 }
 
 static int secp256k1_ge_is_in_correct_subgroup(const secp256k1_ge* ge) {

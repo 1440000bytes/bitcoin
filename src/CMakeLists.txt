@@ -29,7 +29,13 @@ if(NOT WITH_SYSTEM_LIBSECP256K1)
 message("")
 message("Configuring secp256k1 subtree...")
 set(SECP256K1_DISABLE_SHARED ON CACHE BOOL "" FORCE)
-set(SECP256K1_ENABLE_MODULE_ECDH OFF CACHE BOOL "" FORCE)
+# Confidential Transactions: ECDH (blinding-secret derivation to receiver),
+# rangeproof (Pedersen commitments + range proofs) and generator (the NUMS H).
+set(SECP256K1_ENABLE_MODULE_ECDH ON CACHE BOOL "" FORCE)
+set(SECP256K1_ENABLE_MODULE_RANGEPROOF ON CACHE BOOL "" FORCE)
+set(SECP256K1_ENABLE_MODULE_GENERATOR ON CACHE BOOL "" FORCE)
+# Surjection proofs are an Elements multi-asset feature; BTC-only CT does not need them.
+set(SECP256K1_ENABLE_MODULE_SURJECTIONPROOF OFF CACHE BOOL "" FORCE)
 set(SECP256K1_ENABLE_MODULE_RECOVERY ON CACHE BOOL "" FORCE)
 set(SECP256K1_ENABLE_MODULE_MUSIG OFF CACHE BOOL "" FORCE)
 set(SECP256K1_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
@@ -107,6 +113,7 @@ endif()
 
 add_library(bitcoin_consensus STATIC EXCLUDE_FROM_ALL
   arith_uint256.cpp
+  consensus/confidential.cpp
   consensus/merkle.cpp
   consensus/tx_check.cpp
   hash.cpp
@@ -158,6 +165,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   core_read.cpp
   core_write.cpp
   deploymentinfo.cpp
+  blind.cpp
   external_signer.cpp
   init/common.cpp
   kernel/chainparams.cpp

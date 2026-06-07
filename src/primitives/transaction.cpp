@@ -60,7 +60,11 @@ CTxOut::CTxOut(const CAmount& nValueIn, CScript scriptPubKeyIn)
 
 std::string CTxOut::ToString() const
 {
-    return strprintf("CTxOut(nValue=%d.%08d, scriptPubKey=%s)", nValue / COIN, nValue % COIN, HexStr(scriptPubKey).substr(0, 30));
+    if (IsBlinded()) {
+        return strprintf("CTxOut(nValue=CONFIDENTIAL, scriptPubKey=%s)", HexStr(scriptPubKey).substr(0, 30));
+    }
+    const CAmount amount{nValue};
+    return strprintf("CTxOut(nValue=%d.%08d, scriptPubKey=%s)", amount / COIN, amount % COIN, HexStr(scriptPubKey).substr(0, 30));
 }
 
 CMutableTransaction::CMutableTransaction() : version{CTransaction::CURRENT_VERSION}, nLockTime{0} {}
@@ -75,6 +79,8 @@ bool CTransaction::ComputeHasWitness() const
 {
     return std::any_of(vin.begin(), vin.end(), [](const auto& input) {
         return !input.scriptWitness.IsNull();
+    }) || std::any_of(vout.begin(), vout.end(), [](const auto& output) {
+        return output.HasRangeproof();
     });
 }
 
@@ -99,6 +105,11 @@ CAmount CTransaction::GetValueOut() const
 {
     CAmount nValueOut = 0;
     for (const auto& tx_out : vout) {
+        // Confidential (committed) outputs hide their amount and contribute no
+        // explicit value to this sum; they are balanced by the commitment tally.
+        if (tx_out.nValue.IsCommitment()) {
+            continue;
+        }
         if (!MoneyRange(tx_out.nValue) || !MoneyRange(nValueOut + tx_out.nValue))
             throw std::runtime_error(std::string(__func__) + ": value out of range");
         nValueOut += tx_out.nValue;

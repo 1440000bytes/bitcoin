@@ -24,6 +24,12 @@ bool CheckTransaction(const CTransaction& tx, TxValidationState& state)
     CAmount nValueOut = 0;
     for (const auto& txout : tx.vout)
     {
+        // Confidential (committed) outputs hide their amount; their value is
+        // proven in range by a range proof and balanced by the commitment tally
+        // in Consensus::CheckTxInputs. Skip the explicit-amount checks for them.
+        if (txout.nValue.IsCommitment()) {
+            continue;
+        }
         if (txout.nValue < 0)
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-vout-negative");
         if (txout.nValue > MAX_MONEY)

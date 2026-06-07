@@ -109,10 +109,52 @@ struct AmountCompression
     }
 };
 
+/**
+ * Compress a confidential output value for the UTXO set. Explicit amounts keep
+ * the legacy compact VARINT encoding (tag 0); Pedersen commitments are stored as
+ * their 33-byte serialization (tag 8/9 = the commitment prefix). The ECDH nonce
+ * and range proof are receiver/witness data and are intentionally not part of the
+ * UTXO set, so they are not stored here.
+ */
+struct ConfidentialValueCompression
+{
+    template <typename Stream>
+    void Ser(Stream& s, const CConfidentialValue& val)
+    {
+        if (val.IsCommitment()) {
+            s << val.vch[0]; // 8 or 9
+            s.write(MakeByteSpan(val.vch).subspan(1, 32));
+        } else if (val.IsExplicit()) {
+            s << uint8_t{0};
+            s << VARINT(CompressAmount(static_cast<uint64_t>(val.GetAmount())));
+        } else {
+            s << uint8_t{0xff}; // null (not expected for an unspent output)
+        }
+    }
+    template <typename Stream>
+    void Unser(Stream& s, CConfidentialValue& val)
+    {
+        uint8_t tag;
+        s >> tag;
+        if (tag == 8 || tag == 9) {
+            std::vector<unsigned char> c(CConfidentialValue::COMMITMENT_SIZE);
+            c[0] = tag;
+            s.read(MakeWritableByteSpan(c).subspan(1, 32));
+            val.SetToCommitment(c);
+        } else if (tag == 0) {
+            uint64_t v;
+            s >> VARINT(v);
+            val.SetToAmount(DecompressAmount(v));
+        } else {
+            val.SetNull();
+        }
+    }
+};
+
 /** wrapper for CTxOut that provides a more compact serialization */
 struct TxOutCompression
 {
-    FORMATTER_METHODS(CTxOut, obj) { READWRITE(Using<AmountCompression>(obj.nValue), Using<ScriptCompression>(obj.scriptPubKey)); }
+    FORMATTER_METHODS(CTxOut, obj) { READWRITE(Using<ConfidentialValueCompression>(obj.nValue), Using<ScriptCompression>(obj.scriptPubKey)); }
 };
 
 #endif // BITCOIN_COMPRESSOR_H

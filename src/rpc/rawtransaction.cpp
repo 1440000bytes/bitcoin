@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <base58.h>
+#include <blind.h>
 #include <chain.h>
 #include <coins.h>
 #include <consensus/amount.h>
@@ -2089,10 +2090,127 @@ RPCHelpMan descriptorprocesspsbt()
     };
 }
 
+static RPCHelpMan blindrawtransaction()
+{
+    return RPCHelpMan{"blindrawtransaction",
+        "\nMake the specified outputs of a raw transaction confidential: replace each\n"
+        "explicit amount with a Pedersen commitment, attach a range proof and an ECDH\n"
+        "nonce for the receiver, and choose blinding factors so the transaction balances.\n"
+        "The unblinded (explicit) outputs not listed -- typically the fee output -- are\n"
+        "left as-is. Sign the result afterwards with signrawtransactionwithwallet/key.\n",
+        {
+            {"hexstring", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The raw transaction hex"},
+            {"inputamounts", RPCArg::Type::ARR, RPCArg::Optional::NO, "Explicit amount of each input being spent, in vin order",
+                {
+                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Input amount"},
+                }},
+            {"outputs", RPCArg::Type::ARR, RPCArg::Optional::NO, "Outputs to blind and the receiver blinding pubkey for each",
+                {
+                    {"", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "",
+                        {
+                            {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "Index of the output to blind"},
+                            {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Receiver blinding pubkey (33-byte compressed, hex)"},
+                        }},
+                }},
+            {"feeamount", RPCArg::Type::AMOUNT, RPCArg::Default{0}, "If > 0, append an explicit empty-script fee output of this amount before blinding"},
+        },
+        RPCResult{RPCResult::Type::STR_HEX, "hex", "The blinded transaction hex"},
+        RPCExamples{HelpExampleCli("blindrawtransaction", "\"myhex\" \"[50.0]\" \"[{\\\"vout\\\":0,\\\"pubkey\\\":\\\"02..\\\"}]\"")},
+    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    CMutableTransaction mtx;
+    if (!DecodeHexTx(mtx, request.params[0].get_str(), /*try_no_witness=*/true, /*try_witness=*/true)) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
+    }
+
+    const UniValue amounts = request.params[1].get_array();
+    std::vector<CAmount> input_amounts;
+    for (size_t i = 0; i < amounts.size(); ++i) input_amounts.push_back(AmountFromValue(amounts[i]));
+    std::vector<uint256> input_blinds(input_amounts.size(), uint256::ZERO);
+
+    // Optionally append the explicit (empty-script) fee output before blinding.
+    if (!request.params[3].isNull()) {
+        const CAmount fee = AmountFromValue(request.params[3]);
+        if (fee > 0) {
+            CTxOut fee_out;
+            fee_out.nValue = fee; // explicit, empty scriptPubKey
+            mtx.vout.push_back(fee_out);
+        }
+    }
+
+    std::vector<size_t> to_blind;
+    std::vector<CPubKey> pubkeys;
+    const UniValue outs = request.params[2].get_array();
+    for (size_t i = 0; i < outs.size(); ++i) {
+        const UniValue& o = outs[i].get_obj();
+        const int vout = o.find_value("vout").getInt<int>();
+        if (vout < 0 || static_cast<size_t>(vout) >= mtx.vout.size()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "vout out of range");
+        }
+        const std::vector<unsigned char> pk = ParseHex(o.find_value("pubkey").get_str());
+        CPubKey pubkey(pk.begin(), pk.end());
+        if (!pubkey.IsFullyValid()) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid blinding pubkey");
+        to_blind.push_back(static_cast<size_t>(vout));
+        pubkeys.push_back(pubkey);
+    }
+
+    if (!blinding::BlindTransaction(input_amounts, input_blinds, mtx, to_blind, pubkeys)) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Blinding failed (amounts must balance and outputs must be explicit)");
+    }
+    return EncodeHexTx(CTransaction(mtx));
+},
+    };
+}
+
+static RPCHelpMan unblindrawtransaction()
+{
+    return RPCHelpMan{"unblindrawtransaction",
+        "\nRecover the hidden amount and blinding factor of a confidential output using\n"
+        "the receiver's blinding private key.\n",
+        {
+            {"hexstring", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The raw transaction hex"},
+            {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "Index of the confidential output"},
+            {"blindingkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 32-byte blinding private key (hex)"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR_AMOUNT, "amount", "The recovered amount"},
+                {RPCResult::Type::STR_HEX, "blind", "The recovered value blinding factor"},
+            }},
+        RPCExamples{HelpExampleCli("unblindrawtransaction", "\"myhex\" 0 \"privkeyhex\"")},
+    [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    CMutableTransaction mtx;
+    if (!DecodeHexTx(mtx, request.params[0].get_str(), /*try_no_witness=*/true, /*try_witness=*/true)) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
+    }
+    const int vout = request.params[1].getInt<int>();
+    if (vout < 0 || static_cast<size_t>(vout) >= mtx.vout.size()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "vout out of range");
+    }
+    const std::vector<unsigned char> keybytes = ParseHex(request.params[2].get_str());
+    if (keybytes.size() != 32) throw JSONRPCError(RPC_INVALID_PARAMETER, "blindingkey must be 32 bytes");
+    CKey key;
+    key.Set(keybytes.begin(), keybytes.end(), /*fCompressedIn=*/true);
+    if (!key.IsValid()) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid blinding key");
+
+    const auto res = blinding::UnblindOutput(mtx.vout[vout], key);
+    if (!res) throw JSONRPCError(RPC_MISC_ERROR, "Could not unblind this output with the given key");
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("amount", ValueFromAmount(res->first));
+    result.pushKV("blind", HexStr(res->second));
+    return result;
+},
+    };
+}
+
 void RegisterRawTransactionRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{
         {"rawtransactions", &getrawtransaction},
+        {"rawtransactions", &blindrawtransaction},
+        {"rawtransactions", &unblindrawtransaction},
         {"rawtransactions", &createrawtransaction},
         {"rawtransactions", &decoderawtransaction},
         {"rawtransactions", &decodescript},

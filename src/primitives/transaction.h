@@ -8,6 +8,7 @@
 
 #include <attributes.h>
 #include <consensus/amount.h>
+#include <primitives/confidential.h>
 #include <script/script.h>
 #include <serialize.h>
 #include <uint256.h>
@@ -149,8 +150,14 @@ public:
 class CTxOut
 {
 public:
-    CAmount nValue;
+    CConfidentialValue nValue;  //!< explicit amount or Pedersen commitment
+    CConfidentialNonce nNonce;  //!< ephemeral pubkey for ECDH to the receiver (null unless blinded)
     CScript scriptPubKey;
+
+    //! Range proof for a confidential (committed) value. This is witness data:
+    //! it is only serialized through CTransaction (under witness flag bit 2),
+    //! and is deliberately excluded from the txid, operator==, and the UTXO set.
+    std::vector<unsigned char> rangeproof;
 
     CTxOut()
     {
@@ -159,22 +166,30 @@ public:
 
     CTxOut(const CAmount& nValueIn, CScript scriptPubKeyIn);
 
-    SERIALIZE_METHODS(CTxOut, obj) { READWRITE(obj.nValue, obj.scriptPubKey); }
+    SERIALIZE_METHODS(CTxOut, obj) { READWRITE(obj.nValue, obj.nNonce, obj.scriptPubKey); }
+
+    bool HasRangeproof() const { return !rangeproof.empty(); }
 
     void SetNull()
     {
-        nValue = -1;
+        nValue.SetNull();
+        nNonce.SetNull();
         scriptPubKey.clear();
+        rangeproof.clear();
     }
 
     bool IsNull() const
     {
-        return (nValue == -1);
+        return nValue.IsNull();
     }
+
+    //! True when this output's amount is hidden behind a Pedersen commitment.
+    bool IsBlinded() const { return nValue.IsCommitment(); }
 
     friend bool operator==(const CTxOut& a, const CTxOut& b)
     {
         return (a.nValue       == b.nValue &&
+                a.nNonce       == b.nNonce &&
                 a.scriptPubKey == b.scriptPubKey);
     }
 
@@ -245,6 +260,13 @@ void UnserializeTransaction(TxType& tx, Stream& s, const TransactionSerParams& p
             throw std::ios_base::failure("Superfluous witness record");
         }
     }
+    if ((flags & 2) && fAllowWitness) {
+        /* Confidential Transactions: per-output range proofs. */
+        flags ^= 2;
+        for (size_t i = 0; i < tx.vout.size(); i++) {
+            s >> tx.vout[i].rangeproof;
+        }
+    }
     if (flags) {
         /* Unknown flag in the serialization */
         throw std::ios_base::failure("Unknown transaction optional data");
@@ -262,8 +284,12 @@ void SerializeTransaction(const TxType& tx, Stream& s, const TransactionSerParam
     // Consistency check
     if (fAllowWitness) {
         /* Check whether witnesses need to be serialized. */
-        if (tx.HasWitness()) {
+        if (tx.HasInputWitness()) {
             flags |= 1;
+        }
+        /* Confidential Transactions: range proofs on outputs. */
+        if (tx.HasOutputWitness()) {
+            flags |= 2;
         }
     }
     if (flags) {
@@ -277,6 +303,11 @@ void SerializeTransaction(const TxType& tx, Stream& s, const TransactionSerParam
     if (flags & 1) {
         for (size_t i = 0; i < tx.vin.size(); i++) {
             s << tx.vin[i].scriptWitness.stack;
+        }
+    }
+    if (flags & 2) {
+        for (size_t i = 0; i < tx.vout.size(); i++) {
+            s << tx.vout[i].rangeproof;
         }
     }
     s << tx.nLockTime;
@@ -371,6 +402,20 @@ public:
     std::string ToString() const;
 
     bool HasWitness() const { return m_has_witness; }
+    bool HasInputWitness() const
+    {
+        for (size_t i = 0; i < vin.size(); i++) {
+            if (!vin[i].scriptWitness.IsNull()) return true;
+        }
+        return false;
+    }
+    bool HasOutputWitness() const
+    {
+        for (size_t i = 0; i < vout.size(); i++) {
+            if (vout[i].HasRangeproof()) return true;
+        }
+        return false;
+    }
 };
 
 /** A mutable version of CTransaction. */
@@ -409,7 +454,7 @@ struct CMutableTransaction
      */
     Txid GetHash() const;
 
-    bool HasWitness() const
+    bool HasInputWitness() const
     {
         for (size_t i = 0; i < vin.size(); i++) {
             if (!vin[i].scriptWitness.IsNull()) {
@@ -417,6 +462,19 @@ struct CMutableTransaction
             }
         }
         return false;
+    }
+    bool HasOutputWitness() const
+    {
+        for (size_t i = 0; i < vout.size(); i++) {
+            if (vout[i].HasRangeproof()) {
+                return true;
+            }
+        }
+        return false;
+    }
+    bool HasWitness() const
+    {
+        return HasInputWitness() || HasOutputWitness();
     }
 };
 

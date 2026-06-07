@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013, 2014 Pieter Wuille                              *
+ * Copyright (c) 2013-2015 Pieter Wuille, Gregory Maxwell              *
  * Distributed under the MIT software license, see the accompanying    *
  * file COPYING or https://www.opensource.org/licenses/mit-license.php.*
  ***********************************************************************/
@@ -181,6 +181,34 @@ static SECP256K1_INLINE void *checked_malloc(const secp256k1_callback* cb, size_
 
 #define ROUND_TO_ALIGN(size) (CEIL_DIV(size, ALIGNMENT) * ALIGNMENT)
 
+/* Extract the sign of an int64, take the abs and return a uint64, constant time. */
+SECP256K1_INLINE static int secp256k1_sign_and_abs64(uint64_t *out, int64_t in) {
+    uint64_t mask0, mask1;
+    int ret;
+    ret = in < 0;
+    mask0 = ret + ~((uint64_t)0);
+    mask1 = ~mask0;
+    *out = (uint64_t)in;
+    *out = (*out & mask0) | ((~*out + 1) & mask1);
+    return ret;
+}
+
+SECP256K1_INLINE static int secp256k1_clz64_var(uint64_t x) {
+    int ret;
+    if (!x) {
+        return 64;
+    }
+# if defined(HAVE_BUILTIN_CLZLL)
+    ret = __builtin_clzll(x);
+# else
+    /*FIXME: debruijn fallback. */
+    for (ret = 0; ((x & (1ULL << 63)) == 0); x <<= 1, ret++);
+# endif
+    return ret;
+}
+
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+
 /* Macro for restrict, when available and not in a VERIFY build. */
 #if defined(SECP256K1_BUILD) && defined(VERIFY)
 # define SECP256K1_RESTRICT
@@ -212,6 +240,7 @@ static SECP256K1_INLINE void secp256k1_memczero(void *s, size_t len, int flag) {
        take only be 0 or 1, which leads to variable time code. */
     volatile int vflag = flag;
     unsigned char mask = -(unsigned char) vflag;
+    VERIFY_CHECK(flag == 0 || flag == 1);
     while (len) {
         *p &= ~mask;
         p++;
@@ -219,8 +248,8 @@ static SECP256K1_INLINE void secp256k1_memczero(void *s, size_t len, int flag) {
     }
 }
 
-/* Cleanses memory to prevent leaking sensitive info. Won't be optimized out. */
-static SECP256K1_INLINE void secp256k1_memclear(void *ptr, size_t len) {
+/* Zeroes memory to prevent leaking sensitive info. Won't be optimized out. */
+static SECP256K1_INLINE void secp256k1_memzero_explicit(void *ptr, size_t len) {
 #if defined(_MSC_VER)
     /* SecureZeroMemory is guaranteed not to be optimized out by MSVC. */
     SecureZeroMemory(ptr, len);
@@ -232,7 +261,7 @@ static SECP256K1_INLINE void secp256k1_memclear(void *ptr, size_t len) {
      *    As best as we can tell, this is sufficient to break any optimisations that
      *    might try to eliminate "superfluous" memsets.
      * This method is used in memzero_explicit() the Linux kernel, too. Its advantage is that it
-     * is pretty efficient, because the compiler can still implement the memset() efficently,
+     * is pretty efficient, because the compiler can still implement the memset() efficiently,
      * just not remove it entirely. See "Dead Store Elimination (Still) Considered Harmful" by
      * Yang et al. (USENIX Security 2017) for more background.
      */
@@ -242,6 +271,19 @@ static SECP256K1_INLINE void secp256k1_memclear(void *ptr, size_t len) {
     void *(*volatile const volatile_memset)(void *, int, size_t) = memset;
     volatile_memset(ptr, 0, len);
 #endif
+}
+
+/* Cleanses memory to prevent leaking sensitive info. Won't be optimized out.
+ * The state of the memory after this call is unspecified so callers must not
+ * make any assumptions about its contents.
+ *
+ * In VERIFY builds, it has the side effect of marking the memory as undefined.
+ * This helps to detect use-after-clear bugs where code incorrectly reads from
+ * cleansed memory during testing.
+ */
+static SECP256K1_INLINE void secp256k1_memclear_explicit(void *ptr, size_t len) {
+    /* The current implementation zeroes, but callers must not rely on this */
+    secp256k1_memzero_explicit(ptr, len);
 #ifdef VERIFY
     SECP256K1_CHECKMEM_UNDEFINE(ptr, len);
 #endif
@@ -277,11 +319,12 @@ static SECP256K1_INLINE int secp256k1_is_zero_array(const unsigned char *s, size
     }
     ret = (acc == 0);
     /* acc may contain secret values. Try to explicitly clear it. */
-    secp256k1_memclear(&acc, sizeof(acc));
+    secp256k1_memclear_explicit(&acc, sizeof(acc));
     return ret;
 }
 
-/** If flag is true, set *r equal to *a; otherwise leave it. Constant-time.  Both *r and *a must be initialized and non-negative.*/
+/** If flag is 1, set *r equal to *a; if flag is 0, leave it. Constant-time.
+ * Both *r and *a must be initialized and non-negative. Flag must be 0 or 1. */
 static SECP256K1_INLINE void secp256k1_int_cmov(int *r, const int *a, int flag) {
     unsigned int mask0, mask1, r_masked, a_masked;
     /* Access flag with a volatile-qualified lvalue.
@@ -289,6 +332,7 @@ static SECP256K1_INLINE void secp256k1_int_cmov(int *r, const int *a, int flag) 
        take only be 0 or 1, which leads to variable time code. */
     volatile int vflag = flag;
 
+    VERIFY_CHECK(flag == 0 || flag == 1);
     /* Casting a negative int to unsigned and back to int is implementation defined behavior */
     VERIFY_CHECK(*r >= 0 && *a >= 0);
 
