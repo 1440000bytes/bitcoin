@@ -105,6 +105,11 @@ CAmount CTransaction::GetValueOut() const
 {
     CAmount nValueOut = 0;
     for (const auto& tx_out : vout) {
+        // Confidential (committed) outputs hide their amount and contribute no
+        // explicit value to this sum; they are balanced by the commitment tally.
+        if (tx_out.nValue.IsCommitment()) {
+            continue;
+        }
         if (!MoneyRange(tx_out.nValue) || !MoneyRange(nValueOut + tx_out.nValue))
             throw std::runtime_error(std::string(__func__) + ": value out of range");
         nValueOut += tx_out.nValue;
