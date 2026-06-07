@@ -9,6 +9,7 @@
 //   * the homomorphic "balance tally": sum(inputs) == sum(outputs) + fee*H
 // These are exactly the primitives Phase 3's CheckTxInputs replacement calls.
 
+#include <compressor.h>
 #include <consensus/confidential.h>
 #include <primitives/confidential.h>
 #include <primitives/transaction.h>
@@ -302,6 +303,49 @@ BOOST_AUTO_TEST_CASE(check_confidential_transaction)
         auto bad = outputs;
         bad[0] = MakeBlindedOutput(z, out0 + 1, b_cheat);
         BOOST_CHECK(!ct::CheckConfidential(inputs, bad));
+    }
+}
+
+// Phase 4: the UTXO compressor preserves both explicit amounts (legacy compact
+// encoding) and Pedersen commitments (full 33 bytes) across a round trip.
+BOOST_AUTO_TEST_CASE(utxo_compression_roundtrip)
+{
+    ZKPContext z;
+
+    // Explicit value: compresses and restores exactly.
+    {
+        CTxOut out(CAmount{1234500000}, CScript() << OP_TRUE);
+        DataStream ss;
+        ss << Using<TxOutCompression>(out);
+        CTxOut restored;
+        ss >> Using<TxOutCompression>(restored);
+        BOOST_CHECK(restored.nValue.IsExplicit());
+        BOOST_CHECK_EQUAL(restored.nValue.GetAmount(), CAmount{1234500000});
+        BOOST_CHECK(restored.scriptPubKey == out.scriptPubKey);
+    }
+
+    // Committed value: the commitment survives the UTXO encoding intact, so the
+    // spend-time balance tally can use it.
+    {
+        unsigned char blind[32];
+        RandBlind(blind);
+        secp256k1_pedersen_commitment commit;
+        BOOST_REQUIRE(secp256k1_pedersen_commit(z.ctx, &commit, blind, 7777,
+                                                secp256k1_generator_h));
+        unsigned char ser[33];
+        BOOST_REQUIRE(secp256k1_pedersen_commitment_serialize(z.ctx, ser, &commit));
+
+        CTxOut out;
+        out.nValue.SetToCommitment(ser);
+        out.scriptPubKey << OP_TRUE;
+
+        DataStream ss;
+        ss << Using<TxOutCompression>(out);
+        CTxOut restored;
+        ss >> Using<TxOutCompression>(restored);
+        BOOST_CHECK(restored.nValue.IsCommitment());
+        BOOST_CHECK(restored.nValue == out.nValue);
+        BOOST_CHECK(restored.scriptPubKey == out.scriptPubKey);
     }
 }
 
