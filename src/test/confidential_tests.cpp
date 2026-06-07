@@ -11,6 +11,7 @@
 
 #include <compressor.h>
 #include <consensus/confidential.h>
+#include <hash.h>
 #include <primitives/confidential.h>
 #include <primitives/transaction.h>
 #include <random.h>
@@ -347,6 +348,48 @@ BOOST_AUTO_TEST_CASE(utxo_compression_roundtrip)
         BOOST_CHECK(restored.nValue == out.nValue);
         BOOST_CHECK(restored.scriptPubKey == out.scriptPubKey);
     }
+}
+
+// Phase 5: the sighash binds confidential data. The BIP341 sighash hashes the
+// outputs exactly as `ss << txout` (GetOutputsSHA256) and the spent values as
+// `ss << txout.nValue` (GetSpentAmountsSHA256). Reproducing those preimages, a
+// change to an output's value commitment or ECDH nonce must change the digest --
+// otherwise a signature would not commit to the hidden amount.
+BOOST_AUTO_TEST_CASE(sighash_binds_confidential_fields)
+{
+    ZKPContext z;
+    auto outputs_hash = [](const std::vector<CTxOut>& vout) {
+        HashWriter ss{};
+        for (const auto& o : vout) ss << o;
+        return ss.GetSHA256();
+    };
+    auto spent_values_hash = [](const std::vector<CTxOut>& spent) {
+        HashWriter ss{};
+        for (const auto& o : spent) ss << o.nValue;
+        return ss.GetSHA256();
+    };
+
+    unsigned char b1[32], b2[32];
+    RandBlind(b1);
+    RandBlind(b2);
+    CTxOut base = MakeBlindedOutput(z, 500, b1);
+
+    // Same script, different value commitment (different blind) -> different hash.
+    CTxOut other_commit = MakeBlindedOutput(z, 500, b2);
+    BOOST_CHECK(outputs_hash({base}) != outputs_hash({other_commit}));
+    BOOST_CHECK(spent_values_hash({base}) != spent_values_hash({other_commit}));
+
+    // Same commitment, different ECDH nonce -> different outputs hash (the nonce
+    // is part of the committed output).
+    CTxOut with_nonce = base;
+    unsigned char pk[33];
+    pk[0] = 2;
+    for (int i = 1; i < 33; ++i) pk[i] = static_cast<unsigned char>(i);
+    with_nonce.nNonce.SetToPubKey(pk);
+    BOOST_CHECK(outputs_hash({base}) != outputs_hash({with_nonce}));
+
+    // Identical outputs -> identical hash (sanity).
+    BOOST_CHECK(outputs_hash({base}) == outputs_hash({base}));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
