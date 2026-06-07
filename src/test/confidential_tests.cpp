@@ -9,7 +9,9 @@
 //   * the homomorphic "balance tally": sum(inputs) == sum(outputs) + fee*H
 // These are exactly the primitives Phase 3's CheckTxInputs replacement calls.
 
+#include <primitives/confidential.h>
 #include <random.h>
+#include <streams.h>
 
 #include <cstring>
 
@@ -134,6 +136,84 @@ BOOST_AUTO_TEST_CASE(pedersen_balance_tally)
                                             values[3] + 1, secp256k1_generator_h));
     const secp256k1_pedersen_commitment* neg_cheat[3] = {&c[2], &cheat, &c[4]};
     BOOST_CHECK(!secp256k1_pedersen_verify_tally(z.ctx, pos, 2, neg_cheat, 3));
+}
+
+// Phase 2a: the CConfidentialValue/Nonce wire format round-trips, and an
+// explicit value built from a real Pedersen commitment serializes as a
+// 33-byte commitment.
+BOOST_AUTO_TEST_CASE(confidential_value_serialization)
+{
+    // Explicit value round-trips and preserves the amount.
+    {
+        CConfidentialValue v(CAmount{2'100'000'000'000'000}); // 21M BTC in sats
+        BOOST_CHECK(v.IsExplicit());
+        BOOST_CHECK_EQUAL(v.GetAmount(), CAmount{2'100'000'000'000'000});
+
+        DataStream ss;
+        ss << v;
+        BOOST_CHECK_EQUAL(ss.size(), CConfidentialValue::EXPLICIT_SIZE);
+        CConfidentialValue v2;
+        ss >> v2;
+        BOOST_CHECK(v2.IsExplicit());
+        BOOST_CHECK(v == v2);
+        BOOST_CHECK_EQUAL(v2.GetAmount(), CAmount{2'100'000'000'000'000});
+    }
+
+    // Null round-trips to a single zero prefix byte.
+    {
+        CConfidentialValue v;
+        BOOST_CHECK(v.IsNull());
+        DataStream ss;
+        ss << v;
+        BOOST_CHECK_EQUAL(ss.size(), 1U);
+        CConfidentialValue v2(CAmount{5});
+        ss >> v2;
+        BOOST_CHECK(v2.IsNull());
+    }
+
+    // A serialized Pedersen commitment becomes a 33-byte confidential value.
+    {
+        ZKPContext z;
+        unsigned char blind[32];
+        RandBlind(blind);
+        secp256k1_pedersen_commitment commit;
+        BOOST_REQUIRE(secp256k1_pedersen_commit(z.ctx, &commit, blind, 99,
+                                                secp256k1_generator_h));
+        unsigned char ser[33];
+        BOOST_REQUIRE(secp256k1_pedersen_commitment_serialize(z.ctx, ser, &commit));
+
+        CConfidentialValue v;
+        v.SetToCommitment(ser);
+        BOOST_CHECK(v.IsCommitment());
+        BOOST_CHECK(!v.IsExplicit());
+
+        DataStream ss;
+        ss << v;
+        BOOST_CHECK_EQUAL(ss.size(), CConfidentialValue::COMMITMENT_SIZE);
+        CConfidentialValue v2;
+        ss >> v2;
+        BOOST_CHECK(v2.IsCommitment());
+        BOOST_CHECK(v == v2);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(confidential_nonce_serialization)
+{
+    CConfidentialNonce n;
+    BOOST_CHECK(n.IsNull());
+
+    unsigned char pubkey[33];
+    pubkey[0] = 2;
+    for (int i = 1; i < 33; ++i) pubkey[i] = static_cast<unsigned char>(i);
+    n.SetToPubKey(pubkey);
+    BOOST_CHECK(n.IsCommitment());
+
+    DataStream ss;
+    ss << n;
+    BOOST_CHECK_EQUAL(ss.size(), CConfidentialNonce::COMMITMENT_SIZE);
+    CConfidentialNonce n2;
+    ss >> n2;
+    BOOST_CHECK(n == n2);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
